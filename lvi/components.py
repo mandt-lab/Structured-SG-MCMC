@@ -399,6 +399,32 @@ class StochasticNetwork(nn.Module, ABC):
 
         return loss.item()
 
+    def evaluate(
+        self, 
+        batch, 
+        N,  # total number of data points
+        num_samples=None,  # if None and stochastic, uses 1 sample of the weights 
+        deterministic_weights=False,  # If False, will sample from weight chains to estimate negative log likelihood. If True, will use current values of weights to calculate negative log likelihood.
+    ):
+        
+        # We want to evaluate the performance of the model during training by taking 100 samples and doing a prediction
+        
+        X, Y = batch
+        with torch.no_grad():
+            Y_hat, sample_dict = self.sample_pred(
+                X=X,
+                deterministic=deterministic_weights,
+                vi_batch_size=num_samples,
+                for_training=False,
+            )
+
+            log_likelihood = self.calculate_log_likelihood(y=Y, y_hat=Y_hat, N=N)  # size: (num_samples,)
+
+            nll = -log_likelihood.mean(dim=0)
+            #mse = F.mse_loss(Y_hat, Y.unsqueeze(0).expand(num_samples, -1, -1))
+
+        return nll
+
 # Regular feed forward Bayesian neural network
 class FF_BNN(StochasticNetwork):
     
