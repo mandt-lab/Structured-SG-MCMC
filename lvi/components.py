@@ -549,11 +549,14 @@ class FF_BNN(StochasticNetwork):
                 loc=y_hat,
                 **self.output_dist_const_params,
             )
-            log_likelihood = (dist_y_given_x.log_prob(y).sum(dim=-1).mean(dim=-1) * N)
         elif self.output_distribution == "categorical":
-            raise NotImplementedError
+            dist_y_given_x = torch.distributions.categorical.Categorical(
+                logits=y_hat,
+            )
         else:
             raise NotImplementedError
+
+        log_likelihood = (dist_y_given_x.log_prob(y).sum(dim=-1).mean(dim=-1) * N)
 
         return log_likelihood
 
