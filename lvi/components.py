@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import SGD
+from torch.optim import SGD, RMSprop
 
 from lvi.optimizers import SGLD, pSGLD
 
@@ -204,10 +204,12 @@ class StochasticNetwork(nn.Module, ABC):
         update_stoch=True, 
         lr=1e-3, 
         sgd=False, 
-        sgld=False, 
+        rmsprop=False,
+        sgld=False,
         psgld=False,
+        **optimizer_args,
     ):
-        assert(bool(sgd) + bool(sgld) + bool(psgld) == 1)  # xor
+        assert(bool(sgd) + bool(rmsprop) + bool(sgld) + bool(psgld) == 1)  # xor
         assert(update_determ or update_stoch)
 
         params_to_update = []
@@ -225,13 +227,15 @@ class StochasticNetwork(nn.Module, ABC):
             params_to_update.append(deterministic_params)
 
         if sgd:
-            self.optimizer = SGD(params=params_to_update, lr=lr)
+            self.optimizer = SGD(params=params_to_update, lr=lr, **optimizer_args)
+        elif rmsprop:
+            self.optimizer = RMSprop(params=params_to_update, lr=lr, **optimizer_args)
         elif sgld:
-            self.optimizer = SGLD(params=params_to_update, lr=lr)
+            self.optimizer = SGLD(params=params_to_update, lr=lr, **optimizer_args)
         elif psgld:
-            self.optimizer = pSGLD(params=params_to_update, lr=lr)
+            self.optimizer = pSGLD(params=params_to_update, lr=lr, **optimizer_args)
         else:
-            raise Exception("Must use either SGD, SGLD, or pSGLD optimizers.")
+            raise Exception("Must use either SGD, RMSprop, SGLD, or pSGLD optimizers.")
 
 
     @abstractmethod
