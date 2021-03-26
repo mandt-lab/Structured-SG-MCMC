@@ -277,7 +277,7 @@ class StochasticNetwork(nn.Module, ABC):
                     parameter_group_mask = torch.bernoulli(self.dropout_prob_tensor.expand(batch_size, -1))
                 else:
                     # Non-Dropout LVI will have a single parameter group graded per instance
-                    parameter_group_mask = torch.eye(self.num_total_param_groups)
+                    parameter_group_mask = torch.eye(self.num_total_param_groups, device=self.num_samples_per_group.device)
             else:
                 # During prediction time, we want to solely use samples from our distribution
                 parameter_group_mask = torch.zeros_like(self.dropout_prob_tensor.expand(batch_size, -1))
@@ -397,7 +397,7 @@ class StochasticNetwork(nn.Module, ABC):
         if self.using_mcmc:
             self.append_chains(parameter_groups_updated=sample_dict["parameter_groups_updated"])
 
-        return loss.item()
+        return loss.item(), Y_hat, sample_dict
 
     def evaluate(
         self, 
@@ -556,7 +556,9 @@ class FF_BNN(StochasticNetwork):
         else:
             raise NotImplementedError
 
-        log_likelihood = (dist_y_given_x.log_prob(y).sum(dim=-1).mean(dim=-1) * N)
+
+        log_likelihood = (dist_y_given_x.log_prob(y))
+        log_likelihood = (log_likelihood.sum(dim=-1).mean(dim=-1) * N)
 
         return log_likelihood
 
