@@ -475,10 +475,11 @@ class FF_BNN(StochasticNetwork):
 
         # Construct tensors
         tensor_dict = {}
+        next_perm_start = 0
         for i, (h_in, h_out) in enumerate(layer_shapes):
             weight_size, bias_size = (h_in, h_out), (1, h_out)
             
-            tensor_dict["W_{}".format(i)] = StochasticTensor(
+            tensor_dict["W_{}".format(i)], next_perm_start = StochasticTensor(
                 tensor_size=weight_size, 
                 param_group_ids=create_param_group_ids(
                     tensor_size=weight_size,
@@ -487,6 +488,7 @@ class FF_BNN(StochasticNetwork):
                     group_by_layers=group_by_layers,
                     use_random_groups=use_random_groups,
                     use_permuted_groups=use_permuted_groups,
+                    next_perm_start=next_perm_start,
                 ), 
                 num_total_param_groups=max_groups,
                 chain_length=chain_length,
@@ -494,7 +496,7 @@ class FF_BNN(StochasticNetwork):
                 init_values=init_values.get("W_{}".format(i), None),
             )
             if stochastic_biases:
-                bias_vector = StochasticTensor(
+                bias_vector, next_perm_start = StochasticTensor(
                     tensor_size=bias_size, 
                     param_group_ids=create_param_group_ids(
                         tensor_size=bias_size,
@@ -503,6 +505,7 @@ class FF_BNN(StochasticNetwork):
                         group_by_layers=group_by_layers,
                         use_random_groups=use_random_groups,
                         use_permuted_groups=use_permuted_groups,
+                        next_perm_start=next_perm_start,
                     ), 
                     num_total_param_groups=max_groups,
                     chain_length=chain_length,
@@ -590,6 +593,7 @@ def create_param_group_ids(
     group_by_layers,
     use_random_groups,
     use_permuted_groups,
+    next_perm_start,
 ):
     if group_by_layers:
         # every layer is it's own group
@@ -597,24 +601,27 @@ def create_param_group_ids(
             size=tensor_size, 
             fill_value=layer_id, 
             dtype=torch.int64,
-        )
+        ), None
     elif use_random_groups:
         # every weight is uniformly randomly assigned a parameter group 
         return torch.randint(
             size=tensor_size,
             high=num_total_param_groups,
             low=0,
-        )
+        ), None
     elif use_permuted_groups:
         # weights are assigned parameter groups in a way that ensures
         # even representation in each group
         tensor_length = 1
         for dim in tensor_size:
             tensor_length *= dim
-        return torch.arange(
+        indices = torch.arange(
             start=0,
             end=tensor_length,
-        ).view(*tensor_size).remainder(num_total_param_groups)
+        )
+        shifted_indices = (indices + next_perm_start)  #.remainder(tensor_length)
+        param_group_ids = shifted_indices.remainder(num_total_param_groups)
+        return param_group_ids.view(*tensor_size), (param_group_ids[-1].item() + 1) % num_total_param_groups
     else:
         # LVI is disabled, regular SGLD is enabled
         # Every parameter effectively belongs to the same group now
@@ -622,4 +629,4 @@ def create_param_group_ids(
             size=tensor_size, 
             fill_value=0, 
             dtype=torch.int64,
-        )
+        ), None
