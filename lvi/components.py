@@ -479,34 +479,38 @@ class FF_BNN(StochasticNetwork):
         for i, (h_in, h_out) in enumerate(layer_shapes):
             weight_size, bias_size = (h_in, h_out), (1, h_out)
             
-            tensor_dict["W_{}".format(i)], next_perm_start = StochasticTensor(
+            param_group_ids, next_perm_start = create_param_group_ids(
+                tensor_size=weight_size,
+                num_total_param_groups=max_groups,
+                layer_id=i,
+                group_by_layers=group_by_layers,
+                use_random_groups=use_random_groups,
+                use_permuted_groups=use_permuted_groups,
+                next_perm_start=next_perm_start,
+            )
+
+            tensor_dict["W_{}".format(i)] = StochasticTensor(
                 tensor_size=weight_size, 
-                param_group_ids=create_param_group_ids(
-                    tensor_size=weight_size,
-                    num_total_param_groups=max_groups,
-                    layer_id=i,
-                    group_by_layers=group_by_layers,
-                    use_random_groups=use_random_groups,
-                    use_permuted_groups=use_permuted_groups,
-                    next_perm_start=next_perm_start,
-                ), 
+                param_group_ids=param_group_ids, 
                 num_total_param_groups=max_groups,
                 chain_length=chain_length,
                 prior_std=prior_std,
                 init_values=init_values.get("W_{}".format(i), None),
             )
             if stochastic_biases:
-                bias_vector, next_perm_start = StochasticTensor(
+                param_group_ids, next_perm_start = create_param_group_ids(
+                    tensor_size=bias_size,
+                    num_total_param_groups=max_groups,
+                    layer_id=i,
+                    group_by_layers=group_by_layers,
+                    use_random_groups=use_random_groups,
+                    use_permuted_groups=use_permuted_groups,
+                    next_perm_start=next_perm_start,
+                )
+
+                bias_vector = StochasticTensor(
                     tensor_size=bias_size, 
-                    param_group_ids=create_param_group_ids(
-                        tensor_size=bias_size,
-                        num_total_param_groups=max_groups,
-                        layer_id=i,
-                        group_by_layers=group_by_layers,
-                        use_random_groups=use_random_groups,
-                        use_permuted_groups=use_permuted_groups,
-                        next_perm_start=next_perm_start,
-                    ), 
+                    param_group_ids=param_group_ids, 
                     num_total_param_groups=max_groups,
                     chain_length=chain_length,
                     prior_std=prior_std,
