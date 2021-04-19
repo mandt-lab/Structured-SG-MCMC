@@ -198,6 +198,12 @@ class StochasticNetwork(nn.Module, ABC):
             tensor=torch.zeros(size=(num_total_param_groups,), dtype=torch.int64),
         )
 
+    def change_dropout_rate(self, dropout_prob):
+        assert(0.0 < dropout_prob <= 1.0)
+        with torch.no_grad():
+            self.dropout_prob_tensor *= 0.0
+            self.dropout_prob_tensor += dropout_prob
+
     def initialize_optimizer(
         self, 
         update_determ=True, 
