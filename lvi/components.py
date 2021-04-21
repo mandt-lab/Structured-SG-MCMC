@@ -119,7 +119,7 @@ class StochasticTensor(nn.Module):
         self.theta_chains.scatter_(
             dim=0,
             index=chain_idx_to_update,
-            src=self.theta_actual.unsqueeze(0),
+            src=self.theta_actual.data.unsqueeze(0),
         )
 
     def log_prior(self, parameter_groups_updated=None):
