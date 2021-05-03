@@ -595,6 +595,210 @@ class FF_BNN(StochasticNetwork):
                 params.append(param)
         return params
 
+
+class BatchConv2DLayer(nn.Module):
+
+    def __init__(self, stride=1, padding=0, dilation=1):
+        super(BatchConv2DLayer, self).__init__()
+
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+
+    def forward(self, x, weight, bias=None):
+        if bias is None:
+            assert x.shape[0] == weight.shape[0], "dim=0 of x must be equal in size to dim=0 of weight"
+        else:
+            assert x.shape[0] == weight.shape[0] and bias.shape[0] == weight.shape[
+                0], "dim=0 of bias must be equal in size to dim=0 of weight"
+
+        b_i, b_j, c, h, w = x.shape
+        b_i, out_channels, in_channels, kernel_height_size, kernel_width_size = weight.shape
+
+        out = x.permute([1, 0, 2, 3, 4]).reshape(b_j, b_i * c, h, w)
+        weight = weight.reshape(b_i * out_channels, in_channels, kernel_height_size, kernel_width_size)
+
+        out = F.conv2d(out, weight=weight, bias=None, stride=self.stride, dilation=self.dilation, groups=b_i,
+                       padding=self.padding)
+
+
+        out = out.view(b_j, b_i, out_channels, out.shape[-2], out.shape[-1])
+
+        out = out.permute([1, 0, 2, 3, 4])
+
+        if bias is not None:
+            #out = out + bias.unsqueeze(1).unsqueeze(3).unsqueeze(3)
+            out = out + bias.unsqueeze(3).unsqueeze(3)
+
+        return out
+
+
+class SVHN_BCNN(StochasticNetwork):
+    
+    def __init__(
+        self,
+        num_outputs=10,
+        activation_func=nn.ReLU,
+        chain_length=5000,
+        group_by_layers=False,
+        use_random_groups=False,
+        use_permuted_groups=False,
+        max_groups=None,
+        dropout_prob=None,
+        stochastic_biases=False,
+        prior_std=1.0,
+        init_values=None,
+    ):
+        # Check inputs
+        if init_values is None:
+            init_values = {}
+
+        # TODO: Have shapes automatically calculated for the last linear layers
+        # TODO: Allow for adjustable number of layers
+        layer_shapes = [
+            (64, 3*3*3),  # Conv 1
+            (128, 64*3*3), # Conv 2
+            (256, 128*3*3), # Conv 3
+            (4096, 512), # Linear 1
+            (512, 10), # Linear 2
+        ]
+        self.num_convs = 3
+        self.num_lins = 2
+        self.output_distribution = "categorical"
+        self.output_dist_const_params = dict()
+
+        if group_by_layers:
+            max_groups = len(layer_shapes)
+        elif use_random_groups or use_permuted_groups:
+            assert(max_groups is not None)
+        else:
+            max_groups = 1
+
+
+        # Construct tensors
+        tensor_dict = {}
+        next_perm_start = 0
+        for i, shape in enumerate(layer_shapes):
+            if i < self.num_convs:
+                weight_size, bias_size = shape, (1, shape[0])
+            else:
+                weight_size, bias_size = shape, (1, shape[1])
+            
+            param_group_ids, next_perm_start = create_param_group_ids(
+                tensor_size=weight_size,
+                num_total_param_groups=max_groups,
+                layer_id=i,
+                group_by_layers=group_by_layers,
+                use_random_groups=use_random_groups,
+                use_permuted_groups=use_permuted_groups,
+                next_perm_start=next_perm_start,
+            )
+
+            tensor_dict["W_{}".format(i)] = StochasticTensor(
+                tensor_size=weight_size, 
+                param_group_ids=param_group_ids, 
+                num_total_param_groups=max_groups,
+                chain_length=chain_length,
+                prior_std=prior_std,
+                init_values=init_values.get("W_{}".format(i), None),
+            )
+            if stochastic_biases:
+                param_group_ids, next_perm_start = create_param_group_ids(
+                    tensor_size=bias_size,
+                    num_total_param_groups=max_groups,
+                    layer_id=i,
+                    group_by_layers=group_by_layers,
+                    use_random_groups=use_random_groups,
+                    use_permuted_groups=use_permuted_groups,
+                    next_perm_start=next_perm_start,
+                )
+
+                bias_vector = StochasticTensor(
+                    tensor_size=bias_size, 
+                    param_group_ids=param_group_ids, 
+                    num_total_param_groups=max_groups,
+                    chain_length=chain_length,
+                    prior_std=prior_std,
+                    init_values=init_values.get("b_{}".format(i), None),
+                )
+            else:
+                bias_vector = DeterministicTensor(
+                    tensor_size=bias_size,
+                    num_total_param_groups=max_groups,
+                    init_values=init_values.get("b_{}".format(i), None),
+                )
+            tensor_dict["b_{}".format(i)] = bias_vector
+        
+        super(SVHN_BCNN, self).__init__(
+            tensor_dict=tensor_dict,
+            num_total_param_groups=max_groups,
+            chain_length=chain_length,
+            dropout_prob=dropout_prob,
+        )
+
+        self.act_func = activation_func()
+        self.conv = BatchConv2DLayer(stride=1, padding=1, dilation=1)
+        self.max_pool = nn.MaxPool2d(2, 2)
+
+    def forward(
+        self,
+        X,
+        sampled_weights,
+    ):
+        assert(len(X.shape) == 4)
+        data_batch_size = X.shape[0]
+
+        h = X.unsqueeze(0).expand(sampled_weights["vi_batch_size"], -1, -1, -1, -1)
+
+        for i in range(self.num_convs):
+            weight, bias = sampled_weights["samples"][f"W_{i}"], sampled_weights["samples"][f"b_{i}"]
+            weight = weight.reshape(weight.shape[0], weight.shape[1], -1, 3, 3)
+            h = self.conv(h, weight=weight, bias=bias)
+            h = self.act_func(h)
+            orig_shape = h.shape
+            h = self.max_pool(h.reshape(-1, *h.shape[2:]))
+            h = h.reshape(*orig_shape[0:2], *h.shape[1:])
+
+        h = h.reshape(h.shape[0], h.shape[1], -1)  # flatten
+
+        use_activation = False  # will flip after first linear transformation
+        for i in range(self.num_convs, self.num_convs + self.num_lins):
+            weight, bias = sampled_weights["samples"][f"W_{i}"], sampled_weights["samples"][f"b_{i}"]
+            if use_activation:
+                h = torch.bmm(self.act_func(h), weight)
+            else:
+                h = torch.bmm(h, weight)
+                use_activation = True
+            h += bias.expand(-1, h.shape[1], -1)
+
+        return h
+
+    def calculate_log_likelihood(self, y, y_hat, N):
+        dist_y_given_x = torch.distributions.categorical.Categorical(
+            logits=y_hat,
+        )
+        
+        log_likelihood = (dist_y_given_x.log_prob(y))
+        log_likelihood = (log_likelihood.sum(dim=-1).mean(dim=-1) * N)
+
+        return log_likelihood
+
+    def get_stochastic_params(self):
+        params = []
+        for name, param in self.named_parameters():
+            assert(name.split(".")[0] == "tensor_dict")
+            if isinstance(self.tensor_dict[name.split(".")[1]], StochasticTensor):
+                params.append(param)
+        return params
+    
+    def get_deterministic_params(self):
+        params = []
+        for name, param in self.named_parameters():
+            assert(name.split(".")[0] == "tensor_dict")
+            if isinstance(self.tensor_dict[name.split(".")[1]], DeterministicTensor):
+                params.append(param)
+        return params
+
 # Helper function for creating parameter group mappings for tensors
 def create_param_group_ids(
     tensor_size,
