@@ -633,6 +633,295 @@ class BatchConv2DLayer(nn.Module):
         return out
 
 
+class BayesianResNet(StochasticNetwork):
+    
+    def __init__(
+        self,
+        num_blocks,
+        num_outputs=10,
+        activation_func=nn.ReLU,
+        chain_length=5000,
+        group_by_layers=False,
+        use_random_groups=False,
+        use_permuted_groups=False,
+        max_groups=None,
+        dropout_prob=None,
+        stochastic_biases=False,
+        prior_std=1.0,
+        init_values=None,
+    ):
+        # Check inputs
+        if init_values is None:
+            init_values = {}
+
+        # TODO: Have shapes automatically calculated for the last linear layers
+        # TODO: Allow for adjustable number of layers
+        assert(len(num_blocks) == 3)
+        layer_shapes = [
+            ("C0", (16, 3*3*3)),  # Initial Conv
+        ]
+
+        batch_norms = {"C0": nn.BatchNorm2d(16)}
+
+        self.num_blocks = num_blocks
+        in_planes = 16
+        for i, (block, stride, planes) in enumerate(zip(self.num_blocks, [1, 2, 2], [16, 32, 64])):
+            strides = [stride] + [1]*(block-1)
+            for j, s in enumerate(strides):
+                conv_a_name = "C{}_{}_A".format(i, j)
+                conv_b_name = "C{}_{}_B".format(i, j)
+
+                layer_shapes.append((conv_a_name, (planes, in_planes*3*3)))
+                layer_shapes.append((conv_b_name, (planes, planes*3*3)))
+
+                batch_norms[conv_a_name] = nn.BatchNorm2d(planes)
+                batch_norms[conv_b_name] = nn.BatchNorm2d(planes)
+                
+                if (s != 1) or (in_planes != planes):
+                    layer_shapes.append(("C{}_{}_S".format(i, j), (planes, in_planes*3*3)))  # shortcut
+
+                in_planes = planes
+
+        self.num_convs = len(layer_shapes)
+
+        layer_shapes.append(("L", (64, num_outputs)))  # last linear layer
+        self.num_lins = 1
+        
+        self.output_distribution = "categorical"
+        self.output_dist_const_params = dict()
+
+        if group_by_layers:
+            max_groups = len(layer_shapes)
+        elif use_random_groups or use_permuted_groups:
+            assert(max_groups is not None)
+        else:
+            max_groups = 1
+
+
+        # Construct tensors
+        tensor_dict = {}
+        next_perm_start = 0
+        for i, (name, shape) in enumerate(layer_shapes):
+            if i < self.num_convs:
+                weight_size, bias_size = shape, None
+            else:
+                assert("L" == name)
+                weight_size, bias_size = shape, (1, shape[1])
+            
+            param_group_ids, next_perm_start = create_param_group_ids(
+                tensor_size=weight_size,
+                num_total_param_groups=max_groups,
+                layer_id=i,
+                group_by_layers=group_by_layers,
+                use_random_groups=use_random_groups,
+                use_permuted_groups=use_permuted_groups,
+                next_perm_start=next_perm_start,
+            )
+
+            tensor_dict[name] = StochasticTensor(
+                tensor_size=weight_size, 
+                param_group_ids=param_group_ids, 
+                num_total_param_groups=max_groups,
+                chain_length=chain_length,
+                prior_std=prior_std,
+                init_values=init_values.get(name, None),
+            )
+
+            if bias_size is not None:
+                if stochastic_biases:
+                    param_group_ids, next_perm_start = create_param_group_ids(
+                        tensor_size=bias_size,
+                        num_total_param_groups=max_groups,
+                        layer_id=i,
+                        group_by_layers=group_by_layers,
+                        use_random_groups=use_random_groups,
+                        use_permuted_groups=use_permuted_groups,
+                        next_perm_start=next_perm_start,
+                    )
+
+                    bias_vector = StochasticTensor(
+                        tensor_size=bias_size, 
+                        param_group_ids=param_group_ids, 
+                        num_total_param_groups=max_groups,
+                        chain_length=chain_length,
+                        prior_std=prior_std,
+                        init_values=init_values.get(name + "_b", None),
+                    )
+                else:
+                    bias_vector = DeterministicTensor(
+                        tensor_size=bias_size,
+                        num_total_param_groups=max_groups,
+                        init_values=init_values.get(name + "_b", None),
+                    )
+                tensor_dict[name + "_b"] = bias_vector
+        
+        super(BayesianResNet, self).__init__(
+            tensor_dict=tensor_dict,
+            num_total_param_groups=max_groups,
+            chain_length=chain_length,
+            dropout_prob=dropout_prob,
+        )
+
+        self.conv_s1 = BatchConv2DLayer(stride=1, padding=1, dilation=1)
+        self.conv_s2 = BatchConv2DLayer(stride=2, padding=1, dilation=1)
+
+        self.batch_norms = nn.ModuleDict(batch_norms)
+
+        self.act_func = activation_func()
+        #self.max_pool = nn.MaxPool2d(2, 2)
+
+    def get_conv(self, stride):
+        assert(stride in (1,2))
+        if stride == 1:
+            return self.conv_s1
+        else: # if stride == 2:
+            return self.conv_s2
+        
+
+    def forward(
+        self,
+        X,
+        sampled_weights,
+    ):
+        assert(len(X.shape) == 4)
+        data_batch_size = X.shape[0]
+
+        h = X.unsqueeze(0).expand(sampled_weights["vi_batch_size"], -1, -1, -1, -1)
+
+        conv_0_name = 'C0'
+        conv_0 = self.get_conv(1)
+        conv_0_weight = sampled_weights["samples"][conv_0_name]
+        conv_0_weight = conv_0_weight.reshape(conv_0_weight.shape[0], conv_0_weight.shape[1], -1, 3, 3)
+        
+        h = conv_0(h, conv_0_weight, bias=None)
+        h = self.act_func(self.batch_norms[conv_0_name](h.reshape(-1, *h.shape[2:]))).reshape(*h.shape)
+
+        in_planes = 16
+        for i, (block, stride, planes) in enumerate(zip(self.num_blocks, [1, 2, 2], [16, 32, 64])):
+            strides = [stride] + [1]*(block-1)
+            for j, s in enumerate(strides):
+                conv_a_name = "C{}_{}_A".format(i, j)
+                conv_b_name = "C{}_{}_B".format(i, j)
+                conv_s_name = "C{}_{}_S".format(i, j)
+
+                conv_a = conv_s = self.get_conv(s)
+                conv_b = self.get_conv(1)
+
+                conv_a_weight = sampled_weights["samples"][conv_a_name]
+                conv_a_weight = conv_a_weight.reshape(conv_a_weight.shape[0], conv_a_weight.shape[1], -1, 3, 3)
+                
+                temp_h = conv_a(h, conv_a_weight, bias=None)
+                temp_h = self.act_func(self.batch_norms[conv_a_name](temp_h.reshape(-1, *temp_h.shape[2:]))).reshape(*temp_h.shape)
+
+                conv_b_weight = sampled_weights["samples"][conv_b_name]
+                conv_b_weight = conv_b_weight.reshape(conv_b_weight.shape[0], conv_b_weight.shape[1], -1, 3, 3)
+
+                temp_h = conv_b(temp_h, conv_b_weight, bias=None)
+                temp_h = self.act_func(self.batch_norms[conv_b_name](temp_h.reshape(-1, *temp_h.shape[2:]))).reshape(*temp_h.shape)
+
+                if s != 1 or in_planes != planes:
+                    conv_s_weight = sampled_weights["samples"][conv_s_name]
+                    conv_s_weight = conv_s_weight.reshape(conv_s_weight.shape[0], conv_s_weight.shape[1], -1, 3, 3)
+                    temp_h += conv_s(h, conv_s_weight, bias=None)
+                else:
+                    temp_h += h
+
+                h = temp_h
+                in_planes = planes
+
+        orig_shape = h.shape
+        h = F.avg_pool2d(h.reshape(-1, *h.shape[2:]), h.shape[-1])
+        h = h.reshape(*orig_shape[0:2], -1)  # flatten
+        #h = h.reshape(h.shape[0], h.shape[1], -1)  # flatten
+
+        lin_weight, lin_bias = sampled_weights["samples"]["L"], sampled_weights["samples"]["L_b"]
+        h = torch.bmm(h, lin_weight)
+        h += lin_bias.expand(-1, h.shape[1], -1)
+
+        return h
+
+    def calculate_log_likelihood(self, y, y_hat, N):
+        dist_y_given_x = torch.distributions.categorical.Categorical(
+            logits=y_hat,
+        )
+        
+        log_likelihood = (dist_y_given_x.log_prob(y))
+        log_likelihood = (log_likelihood.sum(dim=-1).mean(dim=-1) * N)
+
+        return log_likelihood
+
+    def get_stochastic_params(self):
+        params = []
+        for name, param in self.named_parameters():
+            if name.split(".")[0] != "tensor_dict":
+                continue  # belongs to the batch_norms
+            if isinstance(self.tensor_dict[name.split(".")[1]], StochasticTensor):
+                params.append(param)
+        return params
+    
+    def get_deterministic_params(self):
+        params = []
+        for name, param in self.named_parameters():
+            #assert(name.split(".")[0] == "tensor_dict")
+            if isinstance(self.tensor_dict[name.split(".")[1]], DeterministicTensor) or (name.split(".")[0] == "batch_norms"):
+                params.append(param)
+        return params
+
+class BayesianResNet20(BayesianResNet):
+
+    def __init__(
+        self,
+        **kw_args,
+    ):
+        super(BayesianResNet20, self).__init__(
+            num_blocks=[3, 3, 3], 
+            **kw_args,
+        )
+
+class BayesianResNet32(BayesianResNet):
+
+    def __init__(
+        self,
+        **kw_args,
+    ):
+        super(BayesianResNet32, self).__init__(
+            num_blocks=[5, 5, 5], 
+            **kw_args,
+        )
+
+class BayesianResNet44(BayesianResNet):
+
+    def __init__(
+        self,
+        **kw_args,
+    ):
+        super(BayesianResNet44, self).__init__(
+            num_blocks=[7, 7, 7], 
+            **kw_args,
+        )
+
+class BayesianResNet56(BayesianResNet):
+
+    def __init__(
+        self,
+        **kw_args,
+    ):
+        super(BayesianResNet56, self).__init__(
+            num_blocks=[9, 9, 9], 
+            **kw_args,
+        )
+
+class BayesianResNet110(BayesianResNet):
+
+    def __init__(
+        self,
+        **kw_args,
+    ):
+        super(BayesianResNet110, self).__init__(
+            num_blocks=[18, 18, 18], 
+            **kw_args,
+        )
+
 class SVHN_BCNN(StochasticNetwork):
     
     def __init__(
@@ -657,10 +946,10 @@ class SVHN_BCNN(StochasticNetwork):
         # TODO: Allow for adjustable number of layers
         layer_shapes = [
             (64, 3*3*3),  # Conv 1
-            (128, 64*3*3), # Conv 2
-            (256, 128*3*3), # Conv 3
-            (4096, 512), # Linear 1
-            (512, 10), # Linear 2
+            (64, 64*3*3), # Conv 2
+            (64, 64*3*3), # Conv 3
+            (1024, 256), # Linear 1
+            (256, 10), # Linear 2
         ]
         self.num_convs = 3
         self.num_lins = 2
@@ -798,6 +1087,7 @@ class SVHN_BCNN(StochasticNetwork):
             if isinstance(self.tensor_dict[name.split(".")[1]], DeterministicTensor):
                 params.append(param)
         return params
+
 
 # Helper function for creating parameter group mappings for tensors
 def create_param_group_ids(
