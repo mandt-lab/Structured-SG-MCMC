@@ -416,7 +416,7 @@ class StochasticNetwork(nn.Module, ABC):
         num_samples=None,  # if None and stochastic, uses 1 sample of the weights 
         deterministic_weights=False,  # If False, will sample from weight chains to estimate negative log likelihood. If True, will use current values of weights to calculate negative log likelihood.
     ):
-        
+        self.eval()
         # We want to evaluate the performance of the model during training by taking 100 samples and doing a prediction
         
         X, Y = batch
@@ -433,6 +433,7 @@ class StochasticNetwork(nn.Module, ABC):
             nll = -log_likelihood.mean(dim=0)
             #mse = F.mse_loss(Y_hat, Y.unsqueeze(0).expand(num_samples, -1, -1))
 
+        self.train()
         return nll
 
 # Regular feed forward Bayesian neural network
