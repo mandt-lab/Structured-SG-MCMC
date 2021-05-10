@@ -156,7 +156,6 @@ class H_SA_SGHMC(Optimizer):
                 state["iteration"] += 1  # this is kind of useless now but lets keep it provisionally
 
                 base_C, lr = group["base_C"], group["lr"]
-                weight_decay = state["weight_decay"]
                 tau, g, V_hat = state["tau"], state["g"], state["V_hat"]
 
                 d_p = p.grad.data
