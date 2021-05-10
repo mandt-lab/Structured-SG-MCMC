@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import SGD, RMSprop
 
-from lvi.optimizers import SGLD, pSGLD
+from lvi.optimizers import SGLD, pSGLD, H_SA_SGHMC
 
 from abc import ABC, abstractmethod 
 
@@ -213,9 +213,10 @@ class StochasticNetwork(nn.Module, ABC):
         rmsprop=False,
         sgld=False,
         psgld=False,
+        sghmc=False,
         **optimizer_args,
     ):
-        assert(bool(sgd) + bool(rmsprop) + bool(sgld) + bool(psgld) == 1)  # xor
+        assert(bool(sgd) + bool(rmsprop) + bool(sgld) + bool(psgld) + bool(sghmc) == 1)  # xor
         assert(update_determ or update_stoch)
 
         params_to_update = []
@@ -240,6 +241,14 @@ class StochasticNetwork(nn.Module, ABC):
             self.optimizer = SGLD(params=params_to_update, lr=lr, **optimizer_args)
         elif psgld:
             self.optimizer = pSGLD(params=params_to_update, lr=lr, **optimizer_args)
+        elif sghmc:
+            self.optimizer = H_SA_SGHMC(
+                params=params_to_update, 
+                lr=lr, 
+                base_C=optimizer_args.get("base_C", 0.05),
+                burn_in_period=optimizer_args.get("burn_in_period", 150),  # num iterations to estimate optimization algo parameters
+                momentum_sample_freq=optimizer_args.get("momentum_sample_freq", 1000),  # num iterations to reset momentum
+            )
         else:
             raise Exception("Must use either SGD, RMSprop, SGLD, or pSGLD optimizers.")
 
