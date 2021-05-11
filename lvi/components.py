@@ -250,7 +250,7 @@ class StochasticNetwork(nn.Module, ABC):
                 momentum_sample_freq=optimizer_args.get("momentum_sample_freq", 1000),  # num iterations to reset momentum
             )
         else:
-            raise Exception("Must use either SGD, RMSprop, SGLD, or pSGLD optimizers.")
+            raise Exception("Must use either SGD, RMSprop, SGLD, pSGLD, or SG-HMC optimizers.")
 
 
     @abstractmethod
