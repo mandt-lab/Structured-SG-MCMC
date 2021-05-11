@@ -220,7 +220,7 @@ class StochasticNetwork(nn.Module, ABC):
         assert(update_determ or update_stoch)
 
         params_to_update = []
-        self.using_mcmc = sgld or psgld
+        self.using_mcmc = sgld or psgld or sghmc
 
         if update_stoch:
             stochastic_params = {"params": self.get_stochastic_params()}

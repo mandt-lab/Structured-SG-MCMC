@@ -121,7 +121,7 @@ class H_SA_SGHMC(Optimizer):
     """ Stochastic Gradient Hamiltonian Monte-Carlo Sampler that uses scale adaption during burn-in
         procedure to find some hyperparamters."""
 
-    def __init__(self, params, lr=1e-2, base_C=0.05, burn_in_period=150, momentum_sample_freq=1000):
+    def __init__(self, params, lr=1e-2, base_C=0.05, burn_in_period=150, momentum_sample_freq=1000, addnoise=True):
         self.eps = 1e-6
         self.burn_in_period = burn_in_period
         self.momentum_sample_freq = momentum_sample_freq
@@ -133,6 +133,7 @@ class H_SA_SGHMC(Optimizer):
         defaults = dict(
             lr=lr,
             base_C=base_C,
+            addnoise=addnoise,
         )
         super(H_SA_SGHMC, self).__init__(params, defaults)
 
@@ -176,13 +177,16 @@ class H_SA_SGHMC(Optimizer):
                                                        std=torch.sqrt((lr ** 2) * V_inv_sqrt))
                 v_momentum = state["v_momentum"]
 
-                noise_var = (2. * (lr ** 2) * V_inv_sqrt * base_C - (lr ** 4))
-                noise_std = torch.sqrt(torch.clamp(noise_var, min=1e-16))
-                # sample random epsilon
-                noise_sample = torch.normal(mean=torch.zeros_like(d_p), std=torch.ones_like(d_p) * noise_std)
-
-                # update momentum (Eq 10 right in [1])
-                v_momentum.add_(- (lr ** 2) * V_inv_sqrt * d_p - base_C * v_momentum + noise_sample)
+                if group['addnoise']:
+                    noise_var = (2. * (lr ** 2) * V_inv_sqrt * base_C - (lr ** 4))
+                    noise_std = torch.sqrt(torch.clamp(noise_var, min=1e-16))
+                    # sample random epsilon
+                    noise_sample = torch.normal(mean=torch.zeros_like(d_p), std=torch.ones_like(d_p) * noise_std)
+                    # update momentum (Eq 10 right in [1])
+                    v_momentum.add_(- (lr ** 2) * V_inv_sqrt * d_p - base_C * v_momentum + noise_sample)
+                else:
+                    # update momentum (Eq 10 right in [1])
+                    v_momentum.add_(- (lr ** 2) * V_inv_sqrt * d_p - base_C * v_momentum)
 
                 # update theta (Eq 10 left in [1])
                 p.data.add_(v_momentum)
