@@ -230,7 +230,7 @@ class StochasticNetwork(nn.Module, ABC):
         if update_determ:
             deterministic_params = {"params": self.get_deterministic_params()}
             if self.using_mcmc:
-                stochastic_params["addnoise"] = False
+                deterministic_params["addnoise"] = False
             params_to_update.append(deterministic_params)
 
         if sgd:
