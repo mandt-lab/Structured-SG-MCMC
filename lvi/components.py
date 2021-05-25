@@ -649,6 +649,7 @@ class BayesianResNet(StochasticNetwork):
         self,
         num_blocks,
         num_outputs=10,
+        input_channels=3,
         activation_func=nn.ReLU,
         chain_length=5000,
         group_by_layers=False,
@@ -668,7 +669,7 @@ class BayesianResNet(StochasticNetwork):
         # TODO: Allow for adjustable number of layers
         assert(len(num_blocks) == 3)
         layer_shapes = [
-            ("C0", (16, 3*3*3)),  # Initial Conv
+            ("C0", (16, input_channels*3*3)),  # Initial Conv
         ]
 
         batch_norms = {"C0": nn.BatchNorm2d(16)}
