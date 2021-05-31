@@ -443,7 +443,7 @@ class StochasticNetwork(nn.Module, ABC):
             #mse = F.mse_loss(Y_hat, Y.unsqueeze(0).expand(num_samples, -1, -1))
 
         self.train()
-        return nll
+        return nll, Y_hat
 
 # Regular feed forward Bayesian neural network
 class FF_BNN(StochasticNetwork):
