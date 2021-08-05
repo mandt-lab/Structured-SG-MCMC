@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import SGD, RMSprop
 
+import timeit
+
 from lvi.optimizers import SGLD, pSGLD, H_SA_SGHMC
 
 from abc import ABC, abstractmethod 
@@ -147,6 +149,8 @@ class StochasticTensor(nn.Module):
             if parameter_group_mask is None:
                 parameter_group_mask = torch.ones_like(parameter_group_sample_idx, dtype=torch.float32)
             else:
+#                 if len(parameter_group_mask.shape) == 1:
+#                     parameter_group_mask = torch.unsqueeze(parameter_group_mask, -1)
                 assert(len(parameter_group_mask.shape) == 2)
                 assert(all(x==y for x,y in zip(parameter_group_sample_idx.shape, parameter_group_mask.shape)))
 
@@ -172,14 +176,22 @@ class StochasticNetwork(nn.Module, ABC):
         tensor_dict,
         num_total_param_groups,
         chain_length,
+        dropout_distribution,
+        beta_a,
+        beta_b,
         dropout_prob=None,
+
     ):
         super(StochasticNetwork, self).__init__()
 
         assert(isinstance(tensor_dict, dict))
         for k,v in tensor_dict.items():
             assert(isinstance(v, (StochasticTensor, DeterministicTensor)))
-
+            
+        self.dropout_distribution = dropout_distribution
+        self.beta_a = beta_a
+        self.beta_b = beta_b
+        
         self.tensor_dict = nn.ModuleDict(tensor_dict)
         self.chain_length = chain_length
         self.num_total_param_groups = num_total_param_groups
@@ -197,6 +209,10 @@ class StochasticNetwork(nn.Module, ABC):
             name="num_samples_per_group",
             tensor=torch.zeros(size=(num_total_param_groups,), dtype=torch.int64),
         )
+        
+        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=self.num_samples_per_group.device)) #0.5
+        
+        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=self.num_samples_per_group.device))#0.5
 
     def change_dropout_rate(self, dropout_prob):
         assert(0.0 < dropout_prob <= 1.0)
@@ -230,7 +246,7 @@ class StochasticNetwork(nn.Module, ABC):
         if update_determ:
             deterministic_params = {"params": self.get_deterministic_params()}
             if self.using_mcmc:
-                deterministic_params["addnoise"] = False
+                stochastic_params["addnoise"] = False
             params_to_update.append(deterministic_params)
 
         if sgd:
@@ -293,7 +309,21 @@ class StochasticNetwork(nn.Module, ABC):
             if for_training:
                 if self.use_dropout:
                     # Dropout LVI allows for potentially multiple independent parameter groups to be graded simultaneously
-                    parameter_group_mask = torch.bernoulli(self.dropout_prob_tensor.expand(batch_size, -1))
+                    
+                    if self.dropout_distribution == 'uniform':
+                    # Uniform distribution
+                        parameter_group_mask = torch.rand(self.dropout_prob_tensor.expand(batch_size, -1).shape)
+                        parameter_group_mask = parameter_group_mask.to(torch.device('cuda:0'))
+                    
+                    elif self.dropout_distribution == 'beta':
+                    #Beta distribution
+                        parameter_group_mask = torch.distributions.beta.Beta(self.c0, self.c1).rsample(sample_shape=self.dropout_prob_tensor.expand(batch_size, -1).shape)
+                        parameter_group_mask = torch.squeeze(parameter_group_mask)
+                    
+                    elif self.dropout_distribution == 'bernoulli':
+                    #Bernoulli Distribution
+                        parameter_group_mask = torch.bernoulli(self.dropout_prob_tensor.expand(batch_size, -1))
+
                 else:
                     # Non-Dropout LVI will have a single parameter group graded per instance
                     parameter_group_mask = torch.eye(self.num_total_param_groups, device=self.num_samples_per_group.device)
@@ -443,7 +473,7 @@ class StochasticNetwork(nn.Module, ABC):
             #mse = F.mse_loss(Y_hat, Y.unsqueeze(0).expand(num_samples, -1, -1))
 
         self.train()
-        return nll, Y_hat
+        return nll,Y_hat
 
 # Regular feed forward Bayesian neural network
 class FF_BNN(StochasticNetwork):
@@ -466,6 +496,10 @@ class FF_BNN(StochasticNetwork):
         init_values=None,
         output_distribution="normal",
         output_dist_const_params=dict(scale=1.0),
+        cuda_device = 'cpu',
+        dropout_distribution = 'beta',
+        beta_a = 0.01,
+        beta_b = 0.01,
     ):
         # Check inputs
         if isinstance(hidden_sizes, int):
@@ -475,6 +509,8 @@ class FF_BNN(StochasticNetwork):
         assert(output_distribution in ("normal", "categorical"))
         if init_values is None:
             init_values = {}
+            
+        self.dropout_distribution = dropout_distribution
 
         all_sizes = [num_inputs] + hidden_sizes + [num_outputs]
         layer_shapes = [(x,y) for x,y in zip(all_sizes[:-1], all_sizes[1:])]
@@ -545,9 +581,16 @@ class FF_BNN(StochasticNetwork):
             num_total_param_groups=max_groups,
             chain_length=chain_length,
             dropout_prob=dropout_prob,
+            dropout_distribution=dropout_distribution,
+            beta_a = beta_a,
+            beta_b = beta_b,
         )
 
         self.act_func = activation_func()
+        
+        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=cuda_device))
+        
+        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=cuda_device))
 
     def forward(
         self,
@@ -649,7 +692,6 @@ class BayesianResNet(StochasticNetwork):
         self,
         num_blocks,
         num_outputs=10,
-        input_channels=3,
         activation_func=nn.ReLU,
         chain_length=5000,
         group_by_layers=False,
@@ -669,7 +711,7 @@ class BayesianResNet(StochasticNetwork):
         # TODO: Allow for adjustable number of layers
         assert(len(num_blocks) == 3)
         layer_shapes = [
-            ("C0", (16, input_channels*3*3)),  # Initial Conv
+            ("C0", (16, 1*3*3)),  # Initial Conv
         ]
 
         batch_norms = {"C0": nn.BatchNorm2d(16)}
@@ -1145,3 +1187,4 @@ def create_param_group_ids(
             fill_value=0, 
             dtype=torch.int64,
         ), None
+
