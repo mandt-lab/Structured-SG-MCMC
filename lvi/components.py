@@ -225,6 +225,8 @@ class StochasticNetwork(nn.Module, ABC):
         update_determ=True, 
         update_stoch=True, 
         lr=1e-3, 
+        momentum=0.9, 
+        weight_decay=1e-4,
         sgd=False, 
         rmsprop=False,
         sgld=False,
@@ -250,7 +252,7 @@ class StochasticNetwork(nn.Module, ABC):
             params_to_update.append(deterministic_params)
 
         if sgd:
-            self.optimizer = SGD(params=params_to_update, lr=lr, **optimizer_args)
+            self.optimizer = SGD(params=params_to_update, lr=lr, momentum=momentum, weight_decay=weight_decay, **optimizer_args)
         elif rmsprop:
             self.optimizer = RMSprop(params=params_to_update, lr=lr, **optimizer_args)
         elif sgld:
@@ -267,7 +269,8 @@ class StochasticNetwork(nn.Module, ABC):
             )
         else:
             raise Exception("Must use either SGD, RMSprop, SGLD, pSGLD, or SG-HMC optimizers.")
-
+        self.lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer,
+                                                        milestones=[100, 150], last_epoch=0 - 1)
 
     @abstractmethod
     def get_stochastic_params(self):
@@ -440,8 +443,11 @@ class StochasticNetwork(nn.Module, ABC):
             log_likelihood = log_likelihood.sum(dim=0)
             
         loss = -(log_prior + log_likelihood)
+#         criterion = nn.CrossEntropyLoss()
+#         loss = criterion(Y_hat.squeeze(0),Y)
         loss.backward()
         self.optimizer.step()
+#         self.lr_scheduler.step()
 
         if self.using_mcmc:
             self.append_chains(parameter_groups_updated=sample_dict["parameter_groups_updated"])
@@ -702,6 +708,10 @@ class BayesianResNet(StochasticNetwork):
         stochastic_biases=False,
         prior_std=1.0,
         init_values=None,
+        dropout_distribution = 'beta',
+        beta_a = 0.01,
+        beta_b = 0.01,
+        cuda_device = 'cpu',
     ):
         # Check inputs
         if init_values is None:
@@ -711,7 +721,8 @@ class BayesianResNet(StochasticNetwork):
         # TODO: Allow for adjustable number of layers
         assert(len(num_blocks) == 3)
         layer_shapes = [
-            ("C0", (16, 1*3*3)),  # Initial Conv
+#             ("C0", (16, 1*3*3)),  # Initial Conv
+            ("C0", (16, 3*3*3)),  # Initial Conv
         ]
 
         batch_norms = {"C0": nn.BatchNorm2d(16)}
@@ -813,12 +824,19 @@ class BayesianResNet(StochasticNetwork):
             num_total_param_groups=max_groups,
             chain_length=chain_length,
             dropout_prob=dropout_prob,
+            dropout_distribution=dropout_distribution,
+            beta_a = beta_a,
+            beta_b = beta_b,
         )
 
         self.conv_s1 = BatchConv2DLayer(stride=1, padding=1, dilation=1)
         self.conv_s2 = BatchConv2DLayer(stride=2, padding=1, dilation=1)
 
         self.batch_norms = nn.ModuleDict(batch_norms)
+        
+        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=cuda_device))
+        
+        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=cuda_device))
 
         self.act_func = activation_func()
         #self.max_pool = nn.MaxPool2d(2, 2)
