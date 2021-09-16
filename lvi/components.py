@@ -210,9 +210,9 @@ class StochasticNetwork(nn.Module, ABC):
             tensor=torch.zeros(size=(num_total_param_groups,), dtype=torch.int64),
         )
         
-        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=self.num_samples_per_group.device)) #0.5
+        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=self.num_samples_per_group.device)) 
         
-        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=self.num_samples_per_group.device))#0.5
+        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=self.num_samples_per_group.device))
 
     def change_dropout_rate(self, dropout_prob):
         assert(0.0 < dropout_prob <= 1.0)
@@ -315,8 +315,12 @@ class StochasticNetwork(nn.Module, ABC):
                     
                     if self.dropout_distribution == 'uniform':
                     # Uniform distribution
-                        parameter_group_mask = torch.rand(self.dropout_prob_tensor.expand(batch_size, -1).shape)
-                        parameter_group_mask = parameter_group_mask.to(torch.device('cuda:0'))
+                        parameter_group_mask = torch.distributions.beta.Beta(self.c0, self.c1).rsample(sample_shape=self.dropout_prob_tensor.expand(batch_size, -1).shape)
+                        parameter_group_mask = torch.squeeze(parameter_group_mask)
+                        
+                    elif self.dropout_distribution == 'normal':
+                        parameter_group_mask = abs(torch.distributions.Normal(self.c0,  self.c1).rsample(sample_shape=self.dropout_prob_tensor.expand(batch_size, -1).shape))
+                        parameter_group_mask = torch.squeeze(parameter_group_mask)
                     
                     elif self.dropout_distribution == 'beta':
                     #Beta distribution
