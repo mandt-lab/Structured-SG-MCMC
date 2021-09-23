@@ -508,6 +508,7 @@ class FF_BNN(StochasticNetwork):
         else:
             assert(isinstance(hidden_sizes, list))
         assert(output_distribution in ("normal", "categorical"))
+        assert(group_by_layers + use_random_groups + use_permuted_groups + use_neuron_groups <= 1)  # At most, only one flag may be specified
         if init_values is None:
             init_values = {}
             
@@ -521,7 +522,7 @@ class FF_BNN(StochasticNetwork):
 
         if group_by_layers:
             max_groups = len(layer_shapes)
-        elif use_random_groups or use_permuted_groups or use_neuron_groups:
+        elif use_random_groups or use_permuted_groups:
             assert(max_groups is not None)
         else:
             max_groups = 1
@@ -581,6 +582,9 @@ class FF_BNN(StochasticNetwork):
                 )
             tensor_dict["b_{}".format(i)] = bias_vector
         
+        if use_neuron_groups:
+            max_groups = next_perm_start  # this should be equal to the number of total groups made during construction
+
         super(FF_BNN, self).__init__(
             tensor_dict=tensor_dict,
             num_total_param_groups=max_groups,
