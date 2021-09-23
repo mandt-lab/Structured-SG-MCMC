@@ -489,6 +489,7 @@ class FF_BNN(StochasticNetwork):
         group_by_layers=False,
         use_random_groups=False,
         use_permuted_groups=False,
+        use_neuron_groups=False,
         max_groups=None,
         dropout_prob=None,
         stochastic_biases=False,
@@ -520,7 +521,7 @@ class FF_BNN(StochasticNetwork):
 
         if group_by_layers:
             max_groups = len(layer_shapes)
-        elif use_random_groups or use_permuted_groups:
+        elif use_random_groups or use_permuted_groups or use_neuron_groups:
             assert(max_groups is not None)
         else:
             max_groups = 1
@@ -538,7 +539,9 @@ class FF_BNN(StochasticNetwork):
                 group_by_layers=group_by_layers,
                 use_random_groups=use_random_groups,
                 use_permuted_groups=use_permuted_groups,
+                use_neuron_groups=use_neuron_groups,
                 next_perm_start=next_perm_start,
+                is_bias=False,
             )
 
             tensor_dict["W_{}".format(i)] = StochasticTensor(
@@ -557,7 +560,9 @@ class FF_BNN(StochasticNetwork):
                     group_by_layers=group_by_layers,
                     use_random_groups=use_random_groups,
                     use_permuted_groups=use_permuted_groups,
+                    use_neuron_groups=use_neuron_groups,
                     next_perm_start=next_perm_start,
+                    is_bias=True,
                 )
 
                 bias_vector = StochasticTensor(
@@ -1150,7 +1155,9 @@ def create_param_group_ids(
     group_by_layers,
     use_random_groups,
     use_permuted_groups,
+    use_neuron_groups,
     next_perm_start,
+    is_bias=False,
 ):
     if group_by_layers:
         # every layer is it's own group
@@ -1179,6 +1186,21 @@ def create_param_group_ids(
         shifted_indices = (indices + next_perm_start)  #.remainder(tensor_length)
         param_group_ids = shifted_indices.remainder(num_total_param_groups)
         return param_group_ids.view(*tensor_size), (param_group_ids[-1].item() + 1) % num_total_param_groups
+    elif use_neuron_groups:
+        # weights are assigned parameter groups such that weights associated with
+        # a single neuron are associated with one another but are independent from
+        # every other weight
+        num_neurons = tensor_size[-1]
+        param_group_ids = torch.full(
+            size=tensor_size, 
+            fill_value=next_perm_start - num_neurons if is_bias else next_perm_start, 
+            dtype=torch.int64,
+        )
+
+        for n in range(num_neurons):
+            param_group_ids[..., n] += n
+
+        return param_group_ids, param_group_ids.max().item() + 1
     else:
         # LVI is disabled, regular SGLD is enabled
         # Every parameter effectively belongs to the same group now
