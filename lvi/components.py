@@ -524,6 +524,10 @@ class FF_BNN(StochasticNetwork):
             max_groups = len(layer_shapes)
         elif use_random_groups or use_permuted_groups:
             assert(max_groups is not None)
+        elif use_neuron_groups:
+            max_groups = 0
+            for shape in layer_shapes:
+                max_groups += shape[-1]
         else:
             max_groups = 1
 
@@ -582,9 +586,6 @@ class FF_BNN(StochasticNetwork):
                 )
             tensor_dict["b_{}".format(i)] = bias_vector
         
-        if use_neuron_groups:
-            max_groups = next_perm_start  # this should be equal to the number of total groups made during construction
-
         super(FF_BNN, self).__init__(
             tensor_dict=tensor_dict,
             num_total_param_groups=max_groups,
