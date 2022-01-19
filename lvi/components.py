@@ -180,7 +180,7 @@ class StochasticNetwork(nn.Module, ABC):
         beta_a,
         beta_b,
         dropout_prob=None,
-
+        thinning_rate=1,  # keeps 1 sample out of every `thinning_rate` iterations
     ):
         super(StochasticNetwork, self).__init__()
 
@@ -191,6 +191,9 @@ class StochasticNetwork(nn.Module, ABC):
         self.dropout_distribution = dropout_distribution
         self.beta_a = beta_a
         self.beta_b = beta_b
+        
+        self.thinning_rate = thinning_rate
+        self.thinning_count = thinning_rate - 1
         
         self.tensor_dict = nn.ModuleDict(tensor_dict)
         self.chain_length = chain_length
@@ -345,6 +348,13 @@ class StochasticNetwork(nn.Module, ABC):
         }
 
     def append_chains(self, parameter_groups_updated):
+        # perform thinning procedure check
+        self.thinning_count += 1
+        if self.thinning_count == self.thinning_rate:
+            self.thinning_count = 0
+        else:
+            return  # skip storing sample
+        
         # This method assumes that the actual weights have already been updated from the optimizer
         self.num_samples_per_group += parameter_groups_updated
 
@@ -497,10 +507,11 @@ class FF_BNN(StochasticNetwork):
         init_values=None,
         output_distribution="normal",
         output_dist_const_params=dict(scale=1.0),
-        cuda_device = 'cpu',
-        dropout_distribution = 'beta',
-        beta_a = 0.01,
-        beta_b = 0.01,
+        cuda_device='cpu',
+        dropout_distribution='beta',
+        beta_a=0.01,
+        beta_b=0.01,
+        thinning_rate=1,
     ):
         # Check inputs
         if isinstance(hidden_sizes, int):
@@ -592,8 +603,9 @@ class FF_BNN(StochasticNetwork):
             chain_length=chain_length,
             dropout_prob=dropout_prob,
             dropout_distribution=dropout_distribution,
-            beta_a = beta_a,
-            beta_b = beta_b,
+            beta_a=beta_a,
+            beta_b=beta_b,
+            thinning_rate=thinning_rate,
         )
 
         self.act_func = activation_func()
@@ -712,6 +724,7 @@ class BayesianResNet(StochasticNetwork):
         stochastic_biases=False,
         prior_std=1.0,
         init_values=None,
+        thinning_rate=1,
     ):
         # Check inputs
         if init_values is None:
@@ -823,6 +836,7 @@ class BayesianResNet(StochasticNetwork):
             num_total_param_groups=max_groups,
             chain_length=chain_length,
             dropout_prob=dropout_prob,
+            thinning_rate=thinning_rate,
         )
 
         self.conv_s1 = BatchConv2DLayer(stride=1, padding=1, dilation=1)
@@ -1000,6 +1014,7 @@ class SVHN_BCNN(StochasticNetwork):
         stochastic_biases=False,
         prior_std=1.0,
         init_values=None,
+        thinning_rate=1,
     ):
         # Check inputs
         if init_values is None:
@@ -1086,6 +1101,7 @@ class SVHN_BCNN(StochasticNetwork):
             num_total_param_groups=max_groups,
             chain_length=chain_length,
             dropout_prob=dropout_prob,
+            thinning_rate=thinning_rate,
         )
 
         self.act_func = activation_func()
