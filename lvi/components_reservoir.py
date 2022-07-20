@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import SGD, RMSprop
-
+from collections import Counter
 import timeit
+import numpy as np
+import random
 
-from lvi.optimizers import SGLD, pSGLD, H_SA_SGHMC
+from src.optimizers import SGLD, pSGLD, H_SA_SGHMC
 
 from abc import ABC, abstractmethod 
 
@@ -176,10 +178,8 @@ class StochasticNetwork(nn.Module, ABC):
         tensor_dict,
         num_total_param_groups,
         chain_length,
-        dropout_distribution,
-        beta_a,
-        beta_b,
         dropout_prob=None,
+        dropout_distribution='bernoulli',
         thinning_rate=1,  # keeps 1 sample out of every `thinning_rate` iterations
     ):
         super(StochasticNetwork, self).__init__()
@@ -189,11 +189,6 @@ class StochasticNetwork(nn.Module, ABC):
             assert(isinstance(v, (StochasticTensor, DeterministicTensor)))
             
         self.dropout_distribution = dropout_distribution
-        self.beta_a = beta_a
-        self.beta_b = beta_b
-        
-        self.thinning_rate = thinning_rate
-        self.thinning_count = thinning_rate - 1
         
         self.tensor_dict = nn.ModuleDict(tensor_dict)
         self.chain_length = chain_length
@@ -206,6 +201,9 @@ class StochasticNetwork(nn.Module, ABC):
             name="dropout_prob_tensor",
             tensor=torch.full(size=(1, num_total_param_groups), fill_value=dropout_prob),
         )
+        
+        self.thinning_rate = thinning_rate
+        self.thinning_count = thinning_rate - 1
 
         # Keep track of how many samples are present per parameter group
         self.register_buffer(
@@ -213,9 +211,15 @@ class StochasticNetwork(nn.Module, ABC):
             tensor=torch.zeros(size=(num_total_param_groups,), dtype=torch.int64),
         )
         
-        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=self.num_samples_per_group.device)) #0.5
+        self.register_buffer(
+            name="reservoir_indices",
+            tensor=torch.zeros(size=(num_total_param_groups,), dtype=torch.int64, device=self.num_samples_per_group.device),
+            persistent=False,
+        )
         
-        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=self.num_samples_per_group.device))#0.5
+        self.register_buffer(name="c0", tensor=torch.tensor([0.5],device=self.num_samples_per_group.device))#0.5
+        
+        self.register_buffer(name="c1", tensor=torch.tensor([0.5],device=self.num_samples_per_group.device))#0.5
 
     def change_dropout_rate(self, dropout_prob):
         assert(0.0 < dropout_prob <= 1.0)
@@ -312,20 +316,8 @@ class StochasticNetwork(nn.Module, ABC):
             if for_training:
                 if self.use_dropout:
                     # Dropout LVI allows for potentially multiple independent parameter groups to be graded simultaneously
-                    
-                    if self.dropout_distribution == 'uniform':
-                    # Uniform distribution
-                        parameter_group_mask = torch.rand(self.dropout_prob_tensor.expand(batch_size, -1).shape)
-                        parameter_group_mask = parameter_group_mask.to(torch.device('cuda:0'))
-                    
-                    elif self.dropout_distribution == 'beta':
-                    #Beta distribution
-                        parameter_group_mask = torch.distributions.beta.Beta(self.c0, self.c1).rsample(sample_shape=self.dropout_prob_tensor.expand(batch_size, -1).shape)
-                        parameter_group_mask = torch.squeeze(parameter_group_mask)
-                    
-                    elif self.dropout_distribution == 'bernoulli':
                     #Bernoulli Distribution
-                        parameter_group_mask = torch.bernoulli(self.dropout_prob_tensor.expand(batch_size, -1))
+                    parameter_group_mask = torch.bernoulli(self.dropout_prob_tensor.expand(batch_size, -1))
 
                 else:
                     # Non-Dropout LVI will have a single parameter group graded per instance
@@ -340,7 +332,7 @@ class StochasticNetwork(nn.Module, ABC):
                 parameter_group_mask=parameter_group_mask.t(),
             ) for k,v in self.tensor_dict.items()}
             parameter_groups_updated = (parameter_group_mask.sum(dim=0) > 0).long()
-
+            
         return {
             "samples": samples, 
             "parameter_groups_updated": parameter_groups_updated,
@@ -348,26 +340,63 @@ class StochasticNetwork(nn.Module, ABC):
         }
 
     def append_chains(self, parameter_groups_updated):
-        # perform thinning procedure check
         self.thinning_count += 1
         if self.thinning_count == self.thinning_rate:
             self.thinning_count = 0
         else:
             return  # skip storing sample
         
+        #we implement the reservoir sampling here
+        #first we check the groups whose chains are full. We do not update these groups until all groups have full chains.
+        #Then we set in action the reservoir sampling for every chain. The main difference here is that we 
+        
+        #here we do not update the chains that are full
+        
+        if any(self.num_samples_per_group < self.chain_length):
+            parameter_groups_updated[np.where(self.num_samples_per_group.cpu() == self.chain_length)] = 0
+            self.num_samples_per_group += parameter_groups_updated
+            parameter_group_idx_to_update = (self.num_samples_per_group-1).remainder(self.chain_length)
+        
+            for k,v in self.tensor_dict.items():
+                # For the tensor, take the current actual weights and insert them into the appropriate index
+                # for their group's chain
+                v.append_to_chain(
+                    parameter_group_idx_to_update=parameter_group_idx_to_update,
+                )
+            
+        #here we implement the reservoir sampling    after all chains become full
+#         elif all(self.num_samples_per_group >= self.chain_length):
+        else:
+            j = random.randrange(min(self.num_samples_per_group)+1) #this takes way too long
+#             j = random.randrange(self.num_samples_per_group[0]+1) #here I am just making an assumption
+            if(j < self.chain_length):
+                self.num_samples_per_group += parameter_groups_updated
+                self.reservoir_indices[:] = j   
+#                 print('device of reservoir_indices:', self.reservoir_indices.get_device())
+                parameter_group_idx_to_update = self.reservoir_indices-1
+#                 print('inside the reservoir')
+                for k,v in self.tensor_dict.items():
+                    # For the tensor, take the current actual weights and insert them into the appropriate index
+                    # for their group's chain
+                    v.append_to_chain(
+                        parameter_group_idx_to_update=parameter_group_idx_to_update,
+                    )
+            
         # This method assumes that the actual weights have already been updated from the optimizer
-        self.num_samples_per_group += parameter_groups_updated
-
+#         self.num_samples_per_group += parameter_groups_updated
+#         print(self.num_samples_per_group[:100])
+        
+        
         # `-1` to convert from length to current index
         # `remainder` to wrap indices >= `self.chain_length` to be between `0` and `self.chain_length-1`
-        parameter_group_idx_to_update = (self.num_samples_per_group-1).remainder(self.chain_length)
+#         parameter_group_idx_to_update = (self.num_samples_per_group-1).remainder(self.chain_length)
 
-        for k,v in self.tensor_dict.items():
-            # For the tensor, take the current actual weights and insert them into the appropriate index
-            # for their group's chain
-            v.append_to_chain(
-                parameter_group_idx_to_update=parameter_group_idx_to_update,
-            )
+#         for k,v in self.tensor_dict.items():
+#             # For the tensor, take the current actual weights and insert them into the appropriate index
+#             # for their group's chain
+#             v.append_to_chain(
+#                 parameter_group_idx_to_update=parameter_group_idx_to_update,
+#             )
 
     def init_chains(self):
         self.append_chains(torch.ones_like(self.num_samples_per_group))
@@ -499,7 +528,6 @@ class FF_BNN(StochasticNetwork):
         group_by_layers=False,
         use_random_groups=False,
         use_permuted_groups=False,
-        use_neuron_groups=False,
         max_groups=None,
         dropout_prob=None,
         stochastic_biases=False,
@@ -507,11 +535,8 @@ class FF_BNN(StochasticNetwork):
         init_values=None,
         output_distribution="normal",
         output_dist_const_params=dict(scale=1.0),
-        cuda_device='cpu',
-        dropout_distribution='beta',
-        beta_a=0.01,
-        beta_b=0.01,
-        thinning_rate=1,
+        cuda_device = 'cpu',
+        dropout_distribution = 'bernoulli',
     ):
         # Check inputs
         if isinstance(hidden_sizes, int):
@@ -519,7 +544,6 @@ class FF_BNN(StochasticNetwork):
         else:
             assert(isinstance(hidden_sizes, list))
         assert(output_distribution in ("normal", "categorical"))
-        assert(group_by_layers + use_random_groups + use_permuted_groups + use_neuron_groups <= 1)  # At most, only one flag may be specified
         if init_values is None:
             init_values = {}
             
@@ -535,10 +559,6 @@ class FF_BNN(StochasticNetwork):
             max_groups = len(layer_shapes)
         elif use_random_groups or use_permuted_groups:
             assert(max_groups is not None)
-        elif use_neuron_groups:
-            max_groups = 0
-            for shape in layer_shapes:
-                max_groups += shape[-1]
         else:
             max_groups = 1
 
@@ -555,9 +575,7 @@ class FF_BNN(StochasticNetwork):
                 group_by_layers=group_by_layers,
                 use_random_groups=use_random_groups,
                 use_permuted_groups=use_permuted_groups,
-                use_neuron_groups=use_neuron_groups,
                 next_perm_start=next_perm_start,
-                is_bias=False,
             )
 
             tensor_dict["W_{}".format(i)] = StochasticTensor(
@@ -576,9 +594,7 @@ class FF_BNN(StochasticNetwork):
                     group_by_layers=group_by_layers,
                     use_random_groups=use_random_groups,
                     use_permuted_groups=use_permuted_groups,
-                    use_neuron_groups=use_neuron_groups,
                     next_perm_start=next_perm_start,
-                    is_bias=True,
                 )
 
                 bias_vector = StochasticTensor(
@@ -602,17 +618,13 @@ class FF_BNN(StochasticNetwork):
             num_total_param_groups=max_groups,
             chain_length=chain_length,
             dropout_prob=dropout_prob,
-            dropout_distribution=dropout_distribution,
-            beta_a=beta_a,
-            beta_b=beta_b,
-            thinning_rate=thinning_rate,
         )
 
         self.act_func = activation_func()
         
-        self.register_buffer(name="c0", tensor=torch.tensor([beta_a],device=cuda_device))
+        self.register_buffer(name="c0", tensor=torch.tensor([0.01],device=cuda_device))
         
-        self.register_buffer(name="c1", tensor=torch.tensor([beta_b],device=cuda_device))
+        self.register_buffer(name="c1", tensor=torch.tensor([0.01],device=cuda_device))
 
     def forward(
         self,
@@ -724,7 +736,9 @@ class BayesianResNet(StochasticNetwork):
         stochastic_biases=False,
         prior_std=1.0,
         init_values=None,
-        thinning_rate=1,
+        cuda_device = 'cpu',
+        dropout_distribution = 'bernoulli',
+        thinning_rate=10,
     ):
         # Check inputs
         if init_values is None:
@@ -734,11 +748,12 @@ class BayesianResNet(StochasticNetwork):
         # TODO: Allow for adjustable number of layers
         assert(len(num_blocks) == 3)
         layer_shapes = [
-            ("C0", (16, 1*3*3)),  # Initial Conv
+            ("C0", (16, 3*3*3)),  # Initial Conv #1*3*3 for MNIST, FMNIST
         ]
 
         batch_norms = {"C0": nn.BatchNorm2d(16)}
-
+        
+        self.dropout_distribution = dropout_distribution
         self.num_blocks = num_blocks
         in_planes = 16
         for i, (block, stride, planes) in enumerate(zip(self.num_blocks, [1, 2, 2], [16, 32, 64])):
@@ -1014,7 +1029,6 @@ class SVHN_BCNN(StochasticNetwork):
         stochastic_biases=False,
         prior_std=1.0,
         init_values=None,
-        thinning_rate=1,
     ):
         # Check inputs
         if init_values is None:
@@ -1101,7 +1115,6 @@ class SVHN_BCNN(StochasticNetwork):
             num_total_param_groups=max_groups,
             chain_length=chain_length,
             dropout_prob=dropout_prob,
-            thinning_rate=thinning_rate,
         )
 
         self.act_func = activation_func()
@@ -1176,9 +1189,7 @@ def create_param_group_ids(
     group_by_layers,
     use_random_groups,
     use_permuted_groups,
-    use_neuron_groups,
     next_perm_start,
-    is_bias=False,
 ):
     if group_by_layers:
         # every layer is it's own group
@@ -1207,21 +1218,6 @@ def create_param_group_ids(
         shifted_indices = (indices + next_perm_start)  #.remainder(tensor_length)
         param_group_ids = shifted_indices.remainder(num_total_param_groups)
         return param_group_ids.view(*tensor_size), (param_group_ids[-1].item() + 1) % num_total_param_groups
-    elif use_neuron_groups:
-        # weights are assigned parameter groups such that weights associated with
-        # a single neuron are associated with one another but are independent from
-        # every other weight
-        num_neurons = tensor_size[-1]
-        param_group_ids = torch.full(
-            size=tensor_size, 
-            fill_value=next_perm_start - num_neurons if is_bias else next_perm_start, 
-            dtype=torch.int64,
-        )
-
-        for n in range(num_neurons):
-            param_group_ids[..., n] += n
-
-        return param_group_ids, param_group_ids.max().item() + 1
     else:
         # LVI is disabled, regular SGLD is enabled
         # Every parameter effectively belongs to the same group now
@@ -1230,4 +1226,3 @@ def create_param_group_ids(
             fill_value=0, 
             dtype=torch.int64,
         ), None
-
