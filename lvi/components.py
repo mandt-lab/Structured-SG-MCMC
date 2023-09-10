@@ -177,8 +177,8 @@ class StochasticNetwork(nn.Module, ABC):
         num_total_param_groups,
         chain_length,
         dropout_distribution,
-        beta_a,
-        beta_b,
+        beta_a=0.5,
+        beta_b=0.5,
         dropout_prob=None,
         thinning_rate=1,  # keeps 1 sample out of every `thinning_rate` iterations
     ):
